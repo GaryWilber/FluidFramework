@@ -108,7 +108,7 @@ export class KafkaOrdererConnection implements core.IOrdererConnection {
     /**
      * Sends the client leave op for this connection
      */
-    public async disconnect(): Promise<void> {
+    public async disconnect(clientLeaveMessageServerMetadata?: any): Promise<void> {
         const operation: IDocumentSystemMessage = {
             clientSequenceNumber: -1,
             contents: null,
@@ -116,6 +116,7 @@ export class KafkaOrdererConnection implements core.IOrdererConnection {
             referenceSequenceNumber: -1,
             traces: this.serviceConfiguration.enableTraces ? [] : undefined,
             type: MessageType.ClientLeave,
+            serverMetadata: clientLeaveMessageServerMetadata,
         };
         const message: core.IRawOperationMessage = {
             clientId: null,

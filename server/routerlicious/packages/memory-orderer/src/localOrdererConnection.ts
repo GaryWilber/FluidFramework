@@ -90,7 +90,7 @@ export class LocalOrdererConnection implements IOrdererConnection {
         this.submitRawOperation(rawMessages);
     }
 
-    public async disconnect() {
+    public async disconnect(clientLeaveMessageServerMetadata?: any) {
         const operation: IDocumentSystemMessage = {
             clientSequenceNumber: -1,
             contents: null,
@@ -98,6 +98,7 @@ export class LocalOrdererConnection implements IOrdererConnection {
             referenceSequenceNumber: -1,
             traces: this.serviceConfiguration.enableTraces ? [] : undefined,
             type: MessageType.ClientLeave,
+            serverMetadata: clientLeaveMessageServerMetadata,
         };
         const message: IRawOperationMessage = {
             clientId: null,
