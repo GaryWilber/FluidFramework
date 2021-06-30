@@ -80,7 +80,7 @@ export class SummaryWriter implements ISummaryWriter {
                 (lastSummaryHead !== content.head && existingRef.object.sha !== content.head)) {
                 return {
                     message: {
-                        errorMessage: `Proposed parent summary "${content.head}" does not match actual parent summary "${existingRef ? existingRef.object.sha : "n/a"}".`,
+                        message: `Proposed parent summary "${content.head}" does not match actual parent summary "${existingRef ? existingRef.object.sha : "n/a"}".`,
                         summaryProposal: {
                             summarySequenceNumber: op.sequenceNumber,
                         },
@@ -91,7 +91,7 @@ export class SummaryWriter implements ISummaryWriter {
         } else if (existingRef) {
             return {
                 message: {
-                    errorMessage: `Proposed parent summary "${content.head}" does not match actual parent summary "${existingRef.object.sha}".`,
+                    message: `Proposed parent summary "${content.head}" does not match actual parent summary "${existingRef.object.sha}".`,
                     summaryProposal: {
                         summarySequenceNumber: op.sequenceNumber,
                     },
@@ -107,7 +107,7 @@ export class SummaryWriter implements ISummaryWriter {
         } catch (e) {
             return {
                 message: {
-                    errorMessage: "One or more parent summaries are invalid.",
+                    message: "One or more parent summaries are invalid.",
                     summaryProposal: {
                         summarySequenceNumber: op.sequenceNumber,
                     },
@@ -120,7 +120,7 @@ export class SummaryWriter implements ISummaryWriter {
         if (op.referenceSequenceNumber < checkpoint.protocolState.sequenceNumber) {
             return {
                 message: {
-                    errorMessage: `Proposed summary reference sequence number ${op.referenceSequenceNumber} is less than current sequence number ${checkpoint.protocolState.sequenceNumber}`,
+                    message: `Proposed summary reference sequence number ${op.referenceSequenceNumber} is less than current sequence number ${checkpoint.protocolState.sequenceNumber}`,
                     summaryProposal: {
                         summarySequenceNumber: op.sequenceNumber,
                     },

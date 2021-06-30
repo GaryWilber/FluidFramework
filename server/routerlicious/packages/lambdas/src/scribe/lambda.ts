@@ -222,7 +222,7 @@ export class ScribeLambda implements IPartitionLambda {
                                     await this.sendSummaryNack(nackMessage);
                                     this.context.log?.error(
                                         `Client summary failure @${value.operation.sequenceNumber}. `
-                                        + `Error: ${nackMessage.errorMessage}`,
+                                        + `Error: ${nackMessage.message}`,
                                         {
                                             messageMetaData: {
                                                 documentId: this.documentId,
@@ -241,7 +241,7 @@ export class ScribeLambda implements IPartitionLambda {
                             if (this.serviceConfiguration.scribe.ignoreStorageException) {
                                 await this.sendSummaryNack(
                                     {
-                                        errorMessage: "Failed to summarize the document.",
+                                        message: "Failed to summarize the document.",
                                         summaryProposal: {
                                             summarySequenceNumber: value.operation.sequenceNumber,
                                         },
@@ -476,6 +476,11 @@ export class ScribeLambda implements IPartitionLambda {
     }
 
     private async sendSummaryNack(contents: ISummaryNack) {
+        // temporarily fille out the errorMessage property until it's completely deprecated
+        if (!contents.errorMessage) {
+            contents.errorMessage = contents.message;
+        }
+
         const operation: IDocumentMessage = {
             clientSequenceNumber: -1,
             contents,
