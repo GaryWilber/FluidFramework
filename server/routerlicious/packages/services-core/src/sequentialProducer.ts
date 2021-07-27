@@ -8,10 +8,10 @@ import { IProducer } from "./queue";
 
 /**
  * Combines multiple producers to one.
- * This produces message to all the producers concurrently
- * and waits for all the sends to finish
+ * This produces messages to each producer one after another (in order of the constructor)
+ * It will wait for each send to complete before sending the message to the next producer
  */
-export class CombinedProducer<T = ITicketedMessage> implements IProducer<T> {
+export class SequentialProducer<T = ITicketedMessage> implements IProducer<T> {
     constructor(private readonly producers: IProducer<T>[]) {
     }
 
@@ -22,12 +22,10 @@ export class CombinedProducer<T = ITicketedMessage> implements IProducer<T> {
         return this.producers.every((producer) => producer.isConnected());
     }
 
-    public async send(messages: T[], tenantId: string, documentId: string): Promise<any> {
-        const sendP = [];
+    public async send(messages: T[], tenantId: string, documentId: string): Promise<void> {
         for (const producer of this.producers) {
-            sendP.push(producer.send(messages, tenantId, documentId));
+            await producer.send(messages, tenantId, documentId);
         }
-        return Promise.all(sendP);
     }
 
     public async close(): Promise<void> {
@@ -38,11 +36,11 @@ export class CombinedProducer<T = ITicketedMessage> implements IProducer<T> {
         await Promise.all(closeP);
     }
 
-    public on(event: "connected" | "produced" | "error", listener: (...args: any[]) => void): this {
+    public on(_event: "connected" | "produced" | "error", _listener: (...args: any[]) => void): this {
         return this;
     }
 
-    public once(event: "connected" | "produced" | "error", listener: (...args: any[]) => void): this {
+    public once(_event: "connected" | "produced" | "error", _listener: (...args: any[]) => void): this {
         return this;
     }
 }

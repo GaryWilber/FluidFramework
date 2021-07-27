@@ -25,6 +25,7 @@ export * from "./publisher";
 export * from "./queue";
 export * from "./runner";
 export * from "./secretManager";
+export * from "./sequentialProducer";
 export * from "./taskMessages";
 export * from "./tenant";
 export * from "./throttler";
