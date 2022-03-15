@@ -107,10 +107,12 @@ export interface IProducer<T = ITicketedMessage> {
         listener: (...args: any[]) => void): this;
 }
 
-export interface IPendingBoxcar {
+export interface IPendingBoxcar<T = ITicketedMessage> {
     documentId: string;
     tenantId: string;
     deferred: Deferred<void>;
-    messages: any[];
+    messages: T[];
     partitionId?: number;
+    size: number;
+    addMessages(messages: T[]): void;
 }

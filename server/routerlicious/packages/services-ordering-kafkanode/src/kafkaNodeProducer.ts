@@ -12,6 +12,7 @@ import {
     IProducer,
     PendingBoxcar,
     MaxBatchSize,
+    ITicketedMessage,
 } from "@fluidframework/server-services-core";
 import * as kafka from "kafka-node";
 import { ensureTopics } from "./kafkaTopics";
@@ -46,7 +47,7 @@ export class KafkaNodeProducer implements IProducer {
      * Sends the provided message to Kafka
      */
     // eslint-disable-next-line @typescript-eslint/ban-types,@typescript-eslint/promise-function-async
-    public send(messages: object[], tenantId: string, documentId: string): Promise<any> {
+    public send(messages: ITicketedMessage[], tenantId: string, documentId: string): Promise<any> {
         const key = `${tenantId}/${documentId}`;
 
         // Get the list of boxcars for the given key

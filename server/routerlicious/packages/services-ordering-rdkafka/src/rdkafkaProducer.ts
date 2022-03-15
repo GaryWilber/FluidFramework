@@ -12,6 +12,7 @@ import {
 	PendingBoxcar,
 	MaxBatchSize,
 	IContextErrorData,
+	ITicketedMessage,
 } from "@fluidframework/server-services-core";
 import { Deferred } from "@fluidframework/common-utils";
 
@@ -30,6 +31,8 @@ export interface IKafkaProducerOptions extends Partial<IKafkaBaseOptions> {
 export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 	private readonly producerOptions: IKafkaProducerOptions;
 	private readonly messages = new Map<string, IPendingBoxcar[]>();
+
+	private readonly pendingMessages: IPendingBoxcar[][] = [];
 
 	/**
 	 * Boxcar promises that have been queued into rdkafka and we are waiting for a response
@@ -178,7 +181,11 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 	 * Sends the provided message to Kafka
 	 */
 	// eslint-disable-next-line @typescript-eslint/ban-types,@typescript-eslint/promise-function-async
-	public send(messages: object[], tenantId: string, documentId: string, partitionId?: number): Promise<any> {
+	public send(
+		messages: ITicketedMessage[],
+		tenantId: string,
+		documentId: string,
+		partitionId?: number): Promise<any> {
 		const key = `${tenantId}/${documentId}`;
 
 		// the latest boxcar
@@ -248,12 +255,12 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 	 * Sends all pending messages
 	 */
 	private sendPendingMessages() {
-		const messages = Array.from(this.messages.values());
+		const pendingMessages = this.pendingMessages.slice();
 
 		// clear messages now because sendBoxcars may insert some
-		this.messages.clear();
+		pendingMessages.length = 0;
 
-		for (const message of messages) {
+		for (const message of pendingMessages) {
 			this.sendBoxcars(message);
 		}
 	}
