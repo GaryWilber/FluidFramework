@@ -16,6 +16,7 @@ import { IContainerContext } from '@fluidframework/container-definitions';
 import { IContainerRuntime } from '@fluidframework/container-runtime-definitions';
 import { IContainerRuntimeEvents } from '@fluidframework/container-runtime-definitions';
 import { ICriticalContainerError } from '@fluidframework/container-definitions';
+import { IDataStore } from '@fluidframework/runtime-definitions';
 import { IDeltaManager } from '@fluidframework/container-definitions';
 import { IDisposable } from '@fluidframework/common-definitions';
 import { IDocumentMessage } from '@fluidframework/protocol-definitions';
@@ -54,14 +55,6 @@ import { TypedEventEmitter } from '@fluidframework/common-utils';
 // @public
 export const agentSchedulerId = "_scheduler";
 
-// @public
-export enum AliasResult {
-    Aliasing = "Aliasing",
-    AlreadyAliased = "AlreadyAliased",
-    Conflict = "Conflict",
-    Success = "Success"
-}
-
 // @public (undocumented)
 export enum ContainerMessageType {
     // (undocumented)
@@ -99,7 +92,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
     // (undocumented)
     createDataStore(pkg: string | string[]): Promise<IDataStore>;
     // (undocumented)
-    _createDataStoreWithProps(pkg: string | string[], props?: any, id?: string, isRoot?: boolean): Promise<IFluidRouter>;
+    _createDataStoreWithProps(pkg: string | string[], props?: any, id?: string, isRoot?: boolean): Promise<IDataStore>;
     // (undocumented)
     createDetachedDataStore(pkg: Readonly<string[]>): IFluidDataStoreContextDetached;
     // (undocumented)
@@ -257,6 +250,8 @@ export interface IAckSummaryResult {
 // @public
 export interface IBaseSummarizeResult {
     readonly error: any;
+    // (undocumented)
+    readonly minimumSequenceNumber: number;
     readonly referenceSequenceNumber: number;
     // (undocumented)
     readonly stage: "base";
@@ -318,17 +313,13 @@ export interface IConnectableRuntime {
 
 // @public
 export interface IContainerRuntimeOptions {
+    readonly flushMode?: FlushMode;
     // (undocumented)
-    gcOptions?: IGCRuntimeOptions;
-    loadSequenceNumberVerification?: "close" | "log" | "bypass";
+    readonly gcOptions?: IGCRuntimeOptions;
+    readonly loadSequenceNumberVerification?: "close" | "log" | "bypass";
     // (undocumented)
-    summaryOptions?: ISummaryRuntimeOptions;
-    useDataStoreAliasing?: boolean;
-}
-
-// @public
-export interface IDataStore extends IFluidRouter {
-    trySetAlias(alias: string): Promise<AliasResult>;
+    readonly summaryOptions?: ISummaryRuntimeOptions;
+    readonly useDataStoreAliasing?: boolean;
 }
 
 // @public
@@ -368,7 +359,11 @@ export interface IGCStats {
 // @public
 export interface IGeneratedSummaryStats extends ISummaryStats {
     readonly dataStoreCount: number;
+    readonly gcBlobNodeCount?: number;
     readonly gcStateUpdatedDataStoreCount?: number;
+    readonly gcTotalBlobsSize?: number;
+    readonly nonSystemOpsSinceLastSummary: number;
+    readonly opsSizesSinceLastSummary: number;
     readonly summarizedDataStoreCount: number;
 }
 

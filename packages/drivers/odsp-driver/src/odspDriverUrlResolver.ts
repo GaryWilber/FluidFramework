@@ -6,17 +6,20 @@
 import { assert } from "@fluidframework/common-utils";
 import { IFluidCodeDetails, IRequest, isFluidPackage } from "@fluidframework/core-interfaces";
 import {
+    DriverErrorType,
     DriverHeader,
     IContainerPackageInfo,
     IResolvedUrl,
     IUrlResolver,
 } from "@fluidframework/driver-definitions";
 import { IOdspResolvedUrl, ShareLinkTypes, ShareLinkInfoType } from "@fluidframework/odsp-driver-definitions";
+import { NonRetryableError } from "@fluidframework/driver-utils";
 import { createOdspUrl } from "./createOdspUrl";
 import { getApiRoot } from "./odspUrlHelper";
 import { getOdspResolvedUrl } from "./odspUtils";
 import { getHashedDocumentId } from "./odspPublicUtils";
 import { ClpCompliantAppHeader } from "./contractsPublic";
+import { pkgVersion } from "./packageVersion";
 
 function getUrlBase(siteUrl: string, driveId: string, itemId: string, fileVersion?: string) {
     const siteOrigin = new URL(siteUrl).origin;
@@ -74,7 +77,10 @@ export class OdspDriverUrlResolver implements IUrlResolver {
             const packageName = searchParams.get("containerPackageName");
             const createLinkType = searchParams.get("createLinkType");
             if (!(fileName && siteURL && driveID && filePath !== null && filePath !== undefined)) {
-                throw new Error("Proper new file params should be there!!");
+                throw new NonRetryableError(
+                    "Proper new file params should be there!!",
+                    DriverErrorType.genericError,
+                    { driverVersion: pkgVersion });
             }
             let shareLinkInfo: ShareLinkInfoType | undefined;
             if(createLinkType && createLinkType in ShareLinkTypes) {
@@ -167,13 +173,13 @@ export class OdspDriverUrlResolver implements IUrlResolver {
         // back-compat: IFluidCodeDetails usage to be removed in 0.58.0
         let containerPackageName;
         if (packageInfoSource && "name" in packageInfoSource) {
-            containerPackageName = packageInfoSource.name
+            containerPackageName = packageInfoSource.name;
         } else if (isFluidPackage(packageInfoSource?.package)) {
-            containerPackageName = packageInfoSource?.package.name
+            containerPackageName = packageInfoSource?.package.name;
         } else {
-            containerPackageName = packageInfoSource?.package
+            containerPackageName = packageInfoSource?.package;
         }
-        containerPackageName = containerPackageName ?? odspResolvedUrl.codeHint?.containerPackageName
+        containerPackageName = containerPackageName ?? odspResolvedUrl.codeHint?.containerPackageName;
 
         return createOdspUrl({
             ... odspResolvedUrl,

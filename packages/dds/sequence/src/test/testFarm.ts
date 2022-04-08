@@ -244,11 +244,7 @@ export function TestPack(verbose = true) {
         let annotateProps: PropertySet;
         const insertAsRefPos = false;
 
-        let options = {};
-        if (measureBookmarks) {
-            options = { blockUpdateMarkers: true };
-        }
-        const testServer = new TestServer(options);
+        const testServer = new TestServer({});
         testServer.measureOps = true;
         if (startFile) {
             loadTextFromFile(startFile, testServer.mergeTree, fileSegCount);
@@ -955,22 +951,6 @@ export function TestPack(verbose = true) {
         if (verbose) {
             console.log(cli.mergeTree.toString());
         }
-        let fwdRanges = cli.mergeTree.findHistorialRange(0, 5, 1, 2, cli.getClientId());
-        if (verbose) {
-            console.log(`fwd range 0 5 on 1 => 2`);
-            for (const r of fwdRanges) {
-                console.log(`fwd range (${r.start}, ${r.end})`);
-            }
-        }
-        const fwdPos = cli.mergeTree.findHistorialPosition(2, 1, 2, cli.getClientId());
-        if (verbose) {
-            console.log(`fwd pos 2 on 1 => 2 is ${fwdPos}`);
-            for (let clientId = 0; clientId < 4; clientId++) {
-                for (let refSeq = 0; refSeq < 3; refSeq++) {
-                    console.log(cli.relText(clientId, refSeq));
-                }
-            }
-        }
         cli.insertTextRemote(9, " chaser", undefined, 3, 2, "3");
         cli.removeRangeLocal(12, 14);
         cli.mergeTree.ackPendingSegment({
@@ -1035,14 +1015,6 @@ export function TestPack(verbose = true) {
             }
         }
         const localRemoveOp = cli.removeRangeLocal(3, 5);
-        fwdRanges = cli.mergeTree.findHistorialRangeFromClient(3, 6, 9, 10, 2);
-        if (verbose) {
-            console.log(cli.mergeTree.toString());
-            console.log(`fwd range 3 6 on cli 2 refseq 9 => cli 0 local`);
-            for (const r of fwdRanges) {
-                console.log(`fwd range (${r.start}, ${r.end})`);
-            }
-        }
         cli.applyMsg(cli.makeOpMessage(
             MergeTree.createRemoveRangeOp(3, 6),
             10,
@@ -1487,7 +1459,7 @@ export class DocumentTree {
     }
 
     private generateClient() {
-        const client = new TestClient({ blockUpdateMarkers: true });
+        const client = new TestClient();
         client.startOrUpdateCollaboration("Fred");
         for (const child of this.children) {
             this.addToMergeTree(client, child);

@@ -2,7 +2,8 @@
  * Copyright (c) Microsoft Corporation and contributors. All rights reserved.
  * Licensed under the MIT License.
  */
-
+// See #9219
+/* eslint-disable max-lines */
 import { EventEmitter } from "events";
 import { ITelemetryBaseLogger, ITelemetryGenericEvent, ITelemetryLogger } from "@fluidframework/common-definitions";
 import {
@@ -21,7 +22,6 @@ import {
     IDeltaManager,
     IDeltaSender,
     IRuntime,
-    ContainerWarning,
     ICriticalContainerError,
     AttachState,
     ILoaderOptions,
@@ -86,6 +86,7 @@ import {
     SummarizeInternalFn,
     channelsTreeName,
     IAttachMessage,
+    IDataStore,
 } from "@fluidframework/runtime-definitions";
 import {
     addBlobToSummary,
@@ -99,6 +100,7 @@ import {
     requestFluidObject,
     responseToException,
     seqFromTree,
+    calculateStats,
 } from "@fluidframework/runtime-utils";
 import { v4 as uuid } from "uuid";
 import { ContainerFluidHandleContext } from "./containerHandleContext";
@@ -146,13 +148,12 @@ import {
     IGCStats,
 } from "./garbageCollection";
 import {
-    AliasResult,
     channelToDataStore,
-    IDataStore,
     IDataStoreAliasMessage,
     isDataStoreAliasMessage,
 } from "./dataStore";
 import { BindBatchTracker } from "./batchTracker";
+import { OpTracker } from "./opTelemetry";
 
 export enum ContainerMessageType {
     // An op to be delivered to store
@@ -278,8 +279,8 @@ export interface ISummaryRuntimeOptions {
  * Options for container runtime.
  */
 export interface IContainerRuntimeOptions {
-    summaryOptions?: ISummaryRuntimeOptions;
-    gcOptions?: IGCRuntimeOptions;
+    readonly summaryOptions?: ISummaryRuntimeOptions;
+    readonly gcOptions?: IGCRuntimeOptions;
     /**
      * Affects the behavior while loading the runtime when the data verification check which
      * compares the DeltaManager sequence number (obtained from protocol in summary) to the
@@ -288,13 +289,20 @@ export interface IContainerRuntimeOptions {
      * 2. "log" will log an error event to telemetry, but still continue to load.
      * 3. "bypass" will skip the check entirely. This is not recommended.
      */
-    loadSequenceNumberVerification?: "close" | "log" | "bypass";
+    readonly loadSequenceNumberVerification?: "close" | "log" | "bypass";
     /**
      * Should the runtime use data store aliasing for creating root datastores.
      * In case of aliasing conflicts, the runtime will raise an exception which does
      * not effect the status of the container.
      */
-    useDataStoreAliasing?: boolean;
+    readonly useDataStoreAliasing?: boolean;
+    /**
+     * Sets the flush mode for the runtime. In Immediate flush mode the runtime will immediately
+     * send all operations to the driver layer, while in TurnBased the operations will be buffered
+     * and then sent them as a single batch at the end of the turn.
+     * By default, flush mode is TurnBased.
+     */
+    readonly flushMode?: FlushMode;
 }
 
 type IRuntimeMessageMetadata = undefined | {
@@ -335,9 +343,25 @@ interface OldContainerContextWithLogger extends Omit<IContainerContext, "taggedL
     taggedLogger: undefined;
 }
 
-// Local storage key to set the default flush mode to TurnBased
-const turnBasedFlushModeKey = "Fluid.ContainerRuntime.FlushModeTurnBased";
 const useDataStoreAliasingKey = "Fluid.ContainerRuntime.UseDataStoreAliasing";
+const maxConsecutiveReconnectsKey = "Fluid.ContainerRuntime.MaxConsecutiveReconnects";
+
+// Feature gate for the max op size. If the value is negative, chunking is enabled
+// and all ops over 16k would be chunked. If the value is positive, all ops with
+// a size strictly larger will be rejected and the container closed with an error.
+const maxOpSizeInBytesKey = "Fluid.ContainerRuntime.MaxOpSizeInBytes";
+
+// By default, we should reject any op larger than 768KB,
+// in order to account for some extra overhead from serialization
+// to not reach the 1MB limits in socket.io and Kafka.
+const defaultMaxOpSizeInBytes = 768000;
+
+// By default, the size of the contents for the incoming ops is tracked.
+// However, in certain situations, this may incur a performance hit.
+// The feature-gate below can be used to disable this feature.
+const disableOpTrackingKey = "Fluid.ContainerRuntime.DisableOpTracking";
+
+const defaultFlushMode = FlushMode.TurnBased;
 
 export enum RuntimeMessage {
     FluidDataStoreOp = "component",
@@ -386,6 +410,7 @@ class ScheduleManagerCore {
     private currentBatchClientId: string | undefined;
     private localPaused = false;
     private timePaused = 0;
+    private batchCount = 0;
 
     constructor(
         private readonly deltaManager: IDeltaManager<ISequencedDocumentMessage, IDocumentMessage>,
@@ -474,14 +499,30 @@ class ScheduleManagerCore {
         this.deltaManager.inbound.pause();
     }
 
-    private resumeQueue(startBatch: number, endBatch: number) {
+    private resumeQueue(startBatch: number, messageEndBatch: ISequencedDocumentMessage) {
+        const endBatch = messageEndBatch.sequenceNumber;
+        const duration = performance.now() - this.timePaused;
+
+        this.batchCount++;
+        if (this.batchCount % 1000 === 1) {
+            this.logger.sendTelemetryEvent({
+                eventName: "BatchStats",
+                sequenceNumber: endBatch,
+                length: endBatch - startBatch + 1,
+                msnDistance: endBatch - messageEndBatch.minimumSequenceNumber,
+                duration,
+                batchCount: this.batchCount,
+                interrupted: this.localPaused,
+            });
+        }
+
         // Return early if no change in value
         if (!this.localPaused) {
             return;
         }
 
         this.localPaused = false;
-        const duration = performance.now() - this.timePaused;
+
         // Random round number - we want to know when batch waiting paused op processing.
         if (duration > latencyThreshold) {
             this.logger.sendErrorEvent({
@@ -556,7 +597,7 @@ class ScheduleManagerCore {
         } else if (batchMetadata === false) {
             assert(this.pauseSequenceNumber !== undefined, 0x2a0 /* "batch presence was validated above" */);
             // Batch is complete, we can process it!
-            this.resumeQueue(this.pauseSequenceNumber, message.sequenceNumber);
+            this.resumeQueue(this.pauseSequenceNumber, message);
             this.pauseSequenceNumber = undefined;
             this.currentBatchClientId = undefined;
         } else {
@@ -702,6 +743,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             gcOptions = {},
             loadSequenceNumberVerification = "close",
             useDataStoreAliasing = false,
+            flushMode = defaultFlushMode,
         } = runtimeOptions;
 
         // We pack at data store level only. If isolated channels are disabled,
@@ -772,7 +814,8 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             if (loadSequenceNumberVerification !== "bypass" && runtimeSequenceNumber !== protocolSequenceNumber) {
                 // "Load from summary, runtime metadata sequenceNumber !== initialSequenceNumber"
                 const error = new DataCorruptionError(
-                    "SummaryMetadataMismatch",
+                    // pre-0.58 error message: SummaryMetadataMismatch
+                    "Summary metadata mismatch",
                     { runtimeSequenceNumber, protocolSequenceNumber },
                 );
 
@@ -796,6 +839,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
                 gcOptions,
                 loadSequenceNumberVerification,
                 useDataStoreAliasing,
+                flushMode,
             },
             containerScope,
             logger,
@@ -894,6 +938,10 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
 
     private readonly summarizerNode: IRootSummarizerNodeWithGC;
     private readonly _aliasingEnabled: boolean;
+    private readonly _maxOpSizeInBytes: number;
+
+    private readonly maxConsecutiveReconnects: number;
+    private readonly defaultMaxConsecutiveReconnects = 15;
 
     private _orderSequentiallyCalls: number = 0;
     private _flushMode: FlushMode;
@@ -903,6 +951,8 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
     private _connected: boolean;
 
     private paused: boolean = false;
+
+    private consecutiveReconnects = 0;
 
     public get connected(): boolean {
         return this._connected;
@@ -930,8 +980,6 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
     private dirtyContainer: boolean;
     private emitDirtyDocumentEvent = true;
 
-    private readonly summarizerWarning = (warning: ContainerWarning) =>
-        this.mc.logger.sendTelemetryEvent({ eventName: "summarizerWarning" }, warning);
     /**
      * Summarizer is responsible for coordinating when to send generate and send summaries.
      * It is the main entry point for summary work.
@@ -970,6 +1018,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
 
     private readonly createContainerMetadata: ICreateContainerMetadata;
     private summaryCount: number | undefined;
+    private readonly opTracker: OpTracker;
 
     private constructor(
         private readonly context: IContainerContext,
@@ -1016,14 +1065,15 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         this.mc = loggerToMonitoringContext(
             ChildLogger.create(this.logger, "ContainerRuntime"));
 
-        this._flushMode =
-            this.mc.config.getBoolean(turnBasedFlushModeKey) ?? false
-            ? FlushMode.TurnBased : FlushMode.Immediate;
-
         this._aliasingEnabled =
             (this.mc.config.getBoolean(useDataStoreAliasingKey) ?? false) ||
             (runtimeOptions.useDataStoreAliasing ?? false);
 
+        this._maxOpSizeInBytes = (this.mc.config.getNumber(maxOpSizeInBytesKey) ?? defaultMaxOpSizeInBytes);
+        this.maxConsecutiveReconnects =
+            this.mc.config.getNumber(maxConsecutiveReconnectsKey) ?? this.defaultMaxConsecutiveReconnects;
+
+        this._flushMode = runtimeOptions.flushMode;
         this.garbageCollector = GarbageCollector.create(
             this,
             this.runtimeOptions.gcOptions,
@@ -1116,6 +1166,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         this.pendingStateManager = new PendingStateManager(
             this,
             async (type, content) => this.applyStashedOp(type, content),
+            this._flushMode,
             context.pendingLocalState as IPendingLocalState);
 
         this.context.quorum.on("removeMember", (clientId: string) => {
@@ -1213,7 +1264,6 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
                     },
                     this.runtimeOptions.summaryOptions.summarizerOptions,
                 );
-                this.summaryManager.on("summarizerWarning", this.summarizerWarning);
                 this.summaryManager.start();
             }
         }
@@ -1264,6 +1314,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
 
         ReportOpPerfTelemetry(this.context.clientId, this.deltaManager, this.logger);
         BindBatchTracker(this, this.logger);
+        this.opTracker = new OpTracker(this.deltaManager, this.mc.config.getBoolean(disableOpTrackingKey) === true);
     }
 
     public dispose(error?: Error): void {
@@ -1280,7 +1331,6 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         }, error);
 
         if (this.summaryManager !== undefined) {
-            this.summaryManager.off("summarizerWarning", this.summarizerWarning);
             this.summaryManager.dispose();
         }
         this.garbageCollector.dispose();
@@ -1451,6 +1501,42 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         }
     }
 
+    // Track how many times the container tries to reconnect with pending messages.
+    // This happens when the connection state is changed and we reset the counter
+    // when we are able to process a local op or when there are no pending messages.
+    // If this counter reaches a max, it's a good indicator that the container
+    // is not making progress and it is stuck in a retry loop.
+    private shouldContinueReconnecting(): boolean {
+        if (this.maxConsecutiveReconnects <= 0) {
+            // Feature disabled, we never stop reconnecting
+            return true;
+        }
+
+        if (!this.pendingStateManager.hasPendingMessages()) {
+            // If there are no pending messages, we can always reconnect
+            this.resetReconnectCount();
+            return true;
+        }
+
+        this.consecutiveReconnects++;
+        if (this.consecutiveReconnects === Math.floor(this.maxConsecutiveReconnects / 2)) {
+            // If we're halfway through the max reconnects, send an event in order
+            // to better identify false positives, if any. If the rate of this event
+            // matches Container Close count below, we can safely cut down
+            // maxConsecutiveReconnects to half.
+            this.mc.logger.sendTelemetryEvent({
+                eventName: "ReconnectsWithNoProgress",
+                attempts: this.consecutiveReconnects,
+            });
+        }
+
+        return this.consecutiveReconnects < this.maxConsecutiveReconnects;
+    }
+
+    private resetReconnectCount() {
+        this.consecutiveReconnects = 0;
+    }
+
     private replayPendingStates() {
         // We need to be able to send ops to replay states
         if (!this.canSendOps()) { return; }
@@ -1531,6 +1617,15 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         if (changeOfState) {
             this.deltaManager.off("op", this.onOp);
             this.context.pendingLocalState = undefined;
+            if (!this.shouldContinueReconnecting()) {
+                this.closeFn(new GenericError(
+                    // pre-0.58 error message: MaxReconnectsWithNoProgress
+                    "Runtime detected too many reconnects with no progress syncing local ops",
+                    undefined, // error
+                    { attempts: this.consecutiveReconnects }));
+                return;
+            }
+
             this.replayPendingStates();
         }
 
@@ -1594,6 +1689,13 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
 
             this.emit("op", message);
             this.scheduleManager.afterOpProcessing(undefined, message);
+
+            if (local) {
+                // If we have processed a local op, this means that the container is
+                // making progress and we can reset the counter for how many times
+                // we have consecutively replayed the pending states
+                this.resetReconnectCount();
+            }
         } catch (e) {
             this.scheduleManager.afterOpProcessing(e, message);
             throw e;
@@ -1635,6 +1737,12 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         if (mode === this._flushMode) {
             return;
         }
+
+        this.mc.logger.sendTelemetryEvent({
+            eventName: "FlushMode Updated",
+            old: this._flushMode,
+            new: mode,
+        });
 
         // Flush any pending batches if switching to immediate
         if (mode === FlushMode.Immediate) {
@@ -1701,7 +1809,8 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             this._orderSequentiallyCalls++;
             callback();
         } catch (error) {
-            this.closeFn(new GenericError("orderSequentiallyCallbackException", error));
+            // pre-0.58 error message: orderSequentiallyCallbackException
+            this.closeFn(new GenericError("orderSequentially callback exception", error));
             throw error; // throw the original error for the consumer of the runtime
         } finally {
             this._orderSequentiallyCalls--;
@@ -1747,12 +1856,12 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
      * @param props - Properties for the data store
      * @returns - An aliased data store which can can be found / loaded by alias.
      */
-    private async createAndAliasDataStore(pkg: string | string[], alias: string, props?: any): Promise<IFluidRouter> {
+    private async createAndAliasDataStore(pkg: string | string[], alias: string, props?: any): Promise<IDataStore> {
         const internalId = uuid();
         const dataStore = await this._createDataStore(pkg, false /* isRoot */, internalId, props);
-        const aliasedDataStore = channelToDataStore(dataStore, internalId, this,this.dataStores, this.mc.logger);
+        const aliasedDataStore = channelToDataStore(dataStore, internalId, this, this.dataStores, this.mc.logger);
         const result = await aliasedDataStore.trySetAlias(alias);
-        if (result !== AliasResult.Success) {
+        if (result !== "Success") {
             throw new GenericError(
                 "dataStoreAliasFailure",
                 undefined /* error */,
@@ -1794,13 +1903,17 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         props?: any,
         id = uuid(),
         isRoot = false,
-    ): Promise<IFluidRouter> {
+    ): Promise<IDataStore> {
         const fluidDataStore = await this.dataStores._createFluidDataStoreContext(
             Array.isArray(pkg) ? pkg : [pkg], id, isRoot, props).realize();
         if (isRoot) {
             fluidDataStore.bindToContext();
+            this.logger.sendTelemetryEvent({
+                eventName: "Root datastore with props",
+                hasProps: props !== undefined,
+            });
         }
-        return fluidDataStore;
+        return channelToDataStore(fluidDataStore, id, this, this.dataStores, this.mc.logger);
     }
 
     public async _createDataStoreWithProps(
@@ -1808,7 +1921,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         props?: any,
         id = uuid(),
         isRoot = false,
-    ): Promise<IFluidRouter> {
+    ): Promise<IDataStore> {
         return this._aliasingEnabled === true && isRoot ?
             this.createAndAliasDataStore(pkg, id, props) :
             this._createDataStoreWithPropsLegacy(pkg, props, id, isRoot);
@@ -1976,11 +2089,12 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             gcStats = await this.collectGarbage({ logger: summaryLogger, runSweep, fullGC });
         }
 
-        const summarizeResult = await this.summarizerNode.summarize(fullTree, trackState);
-        assert(summarizeResult.summary.type === SummaryType.Tree,
+        const { stats, summary } = await this.summarizerNode.summarize(fullTree, trackState);
+
+        assert(summary.type === SummaryType.Tree,
             0x12f /* "Container Runtime's summarize should always return a tree" */);
 
-        return { ...summarizeResult, gcStats } as IRootSummaryTreeWithStats;
+        return { stats, summary, gcStats };
     }
 
     /**
@@ -2079,6 +2193,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             await this.deltaManager.inbound.pause();
 
             const summaryRefSeqNum = this.deltaManager.lastSequenceNumber;
+            const minimumSequenceNumber = this.deltaManager.minimumSequenceNumber;
             const message = `Summary @${summaryRefSeqNum}:${this.deltaManager.minimumSequenceNumber}`;
 
             // We should be here is we haven't processed be here. If we are of if the last message's sequence number
@@ -2086,7 +2201,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             if (summaryRefSeqNum !== this.deltaManager.lastMessage?.sequenceNumber) {
                 summaryLogger.sendErrorEvent({
                     eventName: "LastSequenceMismatch",
-                    message,
+                    error: message,
                 });
             }
 
@@ -2123,7 +2238,12 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
 
             let continueResult = checkContinue();
             if (!continueResult.continue) {
-                return { stage: "base", referenceSequenceNumber: summaryRefSeqNum, error: continueResult.error };
+                return {
+                    stage: "base",
+                    referenceSequenceNumber: summaryRefSeqNum,
+                    minimumSequenceNumber,
+                    error: continueResult.error,
+                };
             }
 
             // increment summary count
@@ -2146,7 +2266,12 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
                     runGC: this.garbageCollector.shouldRunGC,
                 });
             } catch (error) {
-                return { stage: "base", referenceSequenceNumber: summaryRefSeqNum, error };
+                return {
+                    stage: "base",
+                    referenceSequenceNumber: summaryRefSeqNum,
+                    minimumSequenceNumber,
+                    error,
+                };
             }
             const { summary: summaryTree, stats: partialStats } = summarizeResult;
 
@@ -2161,15 +2286,23 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             assert(dataStoreTree.type === SummaryType.Tree, 0x1fc /* "summary is not a tree" */);
             const handleCount = Object.values(dataStoreTree.tree).filter(
                 (value) => value.type === SummaryType.Handle).length;
+            const gcSummaryTreeStats = summaryTree.tree[gcTreeKey]
+                ? calculateStats((summaryTree.tree[gcTreeKey] as ISummaryTree))
+                : undefined;
 
             const summaryStats: IGeneratedSummaryStats = {
                 dataStoreCount: this.dataStores.size,
                 summarizedDataStoreCount: this.dataStores.size - handleCount,
                 gcStateUpdatedDataStoreCount: summarizeResult.gcStats?.updatedDataStoreCount,
+                gcBlobNodeCount: gcSummaryTreeStats?.blobNodeCount,
+                gcTotalBlobsSize: gcSummaryTreeStats?.totalBlobSize,
+                opsSizesSinceLastSummary: this.opTracker.opsSizeAccumulator,
+                nonSystemOpsSinceLastSummary: this.opTracker.nonSystemOpCount,
                 ...partialStats,
             };
             const generateSummaryData = {
                 referenceSequenceNumber: summaryRefSeqNum,
+                minimumSequenceNumber,
                 summaryTree,
                 summaryStats,
                 generateDuration: trace.trace().duration,
@@ -2236,7 +2369,7 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
             } as const;
 
             this.summarizerNode.completeSummary(handle);
-
+            this.opTracker.reset();
             return submitData;
         } finally {
             // Cleanup wip summary in case of failure
@@ -2359,18 +2492,13 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
                 }
             }
 
-            // Note: Chunking will increase content beyond maxOpSize because we JSON'ing JSON payload -
-            // there will be a lot of escape characters that can make it up to 2x bigger!
-            // This is Ok, because DeltaManager.shouldSplit() will have 2 * maxMessageSize limit
-            if (!serializedContent || serializedContent.length <= maxOpSize) {
-                clientSequenceNumber = this.submitRuntimeMessage(
-                    type,
-                    content,
-                    /* batch: */ this._flushMode === FlushMode.TurnBased,
-                    opMetadataInternal);
-            } else {
-                clientSequenceNumber = this.submitChunkedMessage(type, serializedContent, maxOpSize);
-            }
+            clientSequenceNumber = this.submitMaybeChunkedMessages(
+                type,
+                content,
+                serializedContent,
+                maxOpSize,
+                this._flushMode === FlushMode.TurnBased,
+                opMetadataInternal);
         }
 
         // Let the PendingStateManager know that a message was submitted.
@@ -2385,6 +2513,48 @@ export class ContainerRuntime extends TypedEventEmitter<IContainerRuntimeEvents>
         if (this.isContainerMessageDirtyable(type, content)) {
             this.updateDocumentDirtyState(true);
         }
+    }
+
+    private submitMaybeChunkedMessages(
+        type: ContainerMessageType,
+        content: any,
+        serializedContent: string,
+        serverMaxOpSize: number,
+        batch: boolean,
+        opMetadataInternal: unknown = undefined,
+    ): number {
+        if (this._maxOpSizeInBytes >= 0) {
+            // Chunking disabled
+            if (!serializedContent || serializedContent.length <= this._maxOpSizeInBytes) {
+                return this.submitRuntimeMessage(type, content, batch, opMetadataInternal);
+            }
+
+            // When chunking is disabled, we ignore the server max message size
+            // and if the content length is larger than the client configured message size
+            // instead of splitting the content, we will fail by explicitly close the container
+            this.closeFn(new GenericError(
+                "OpTooLarge",
+                /* error */ undefined,
+                {
+                    length: {
+                        value: serializedContent.length,
+                        tag: TelemetryDataTag.PackageData,
+                    },
+                    limit: {
+                        value: this._maxOpSizeInBytes,
+                        tag: TelemetryDataTag.PackageData,
+                    },
+                }));
+            return -1;
+        }
+
+        // Chunking enabled, fallback on the server's max message size
+        // and split the content accordingly
+        if (!serializedContent || serializedContent.length <= serverMaxOpSize) {
+            return this.submitRuntimeMessage(type, content, batch, opMetadataInternal);
+        }
+
+        return this.submitChunkedMessage(type, serializedContent, serverMaxOpSize);
     }
 
     private submitChunkedMessage(type: ContainerMessageType, content: string, maxOpSize: number): number {

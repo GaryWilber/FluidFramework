@@ -134,9 +134,12 @@ export interface IContainer extends IEventProvider<IContainerEvents>, IFluidRout
     close(error?: ICriticalContainerError): void;
     closeAndGetPendingLocalState(): string;
     readonly closed: boolean;
+    connect?(): void;
+    // @deprecated
     readonly connected: boolean;
     readonly connectionState: ConnectionState;
     deltaManager: IDeltaManager<ISequencedDocumentMessage, IDocumentMessage>;
+    disconnect?(): void;
     // @alpha
     forceReadonly?(readonly: boolean): any;
     getAbsoluteUrl(relativeUrl: string): Promise<string | undefined>;
@@ -148,10 +151,10 @@ export interface IContainer extends IEventProvider<IContainerEvents>, IFluidRout
     readonly readOnlyInfo: ReadOnlyInfo;
     request(request: IRequest): Promise<IResponse>;
     resolvedUrl: IResolvedUrl | undefined;
-    // @alpha
+    // @deprecated
     resume?(): void;
     serialize(): string;
-    // @alpha
+    // @deprecated
     setAutoReconnect?(reconnect: boolean): void;
 }
 
@@ -188,7 +191,7 @@ export interface IContainerContext extends IDisposable {
     // (undocumented)
     readonly quorum: IQuorumClients;
     // @deprecated (undocumented)
-    raiseContainerWarning(warning: ContainerWarning): void;
+    raiseContainerWarning?(warning: ContainerWarning): void;
     readonly scope: IFluidObject & FluidObject;
     // (undocumented)
     readonly serviceConfiguration: IClientConfiguration | undefined;

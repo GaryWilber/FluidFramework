@@ -95,7 +95,7 @@ describe("Runtime", () => {
                 const contents: ISummaryNack & { retryAfter?: number } = {
                     summaryProposal,
                     retryAfter: retryAfterSeconds,
-                    errorMessage: "test-nack",
+                    message: "test-nack",
                 };
                 mockDeltaManager.emit("op", { contents, type: MessageType.SummaryNack });
 
@@ -155,6 +155,7 @@ describe("Runtime", () => {
                         return {
                             stage: "submit",
                             referenceSequenceNumber: lastRefSeq,
+                            minimumSequenceNumber: 0,
                             generateDuration: 0,
                             uploadDuration: 0,
                             submitOpDuration: 0,
@@ -167,6 +168,8 @@ describe("Runtime", () => {
                                 dataStoreCount: 0,
                                 summarizedDataStoreCount: 0,
                                 unreferencedBlobSize: 0,
+                                opsSizesSinceLastSummary: 0,
+                                nonSystemOpsSinceLastSummary: 0,
                             },
                             handle: "test-handle",
                             clientSequenceNumber: lastClientSeq,
@@ -680,7 +683,7 @@ describe("Runtime", () => {
                     assert(!ackNackResult.success, "on-demand summary should fail");
                     assert(ackNackResult.data?.summaryNackOp.type === MessageType.SummaryNack,
                         "should be nack");
-                    assert(ackNackResult.data.summaryNackOp.contents.errorMessage === "test-nack",
+                    assert(ackNackResult.data.summaryNackOp.contents.message === "test-nack",
                         "summary nack error should be test-nack");
                 });
 

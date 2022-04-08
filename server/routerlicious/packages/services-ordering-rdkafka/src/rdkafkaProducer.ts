@@ -298,7 +298,6 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 									tenantId: boxcar.tenantId,
 									documentId: boxcar.documentId,
 								});
-
 							} else {
 								boxcar.deferred.resolve();
 								this.emit("produced", boxcarMessage, offset, message.length);
@@ -312,11 +311,12 @@ export class RdkafkaProducer extends RdkafkaBase implements IProducer {
 					// when this happens, let's requeue the messages for later.
 					// note: send will return a new deferred. we need to hook it into
 					// the existing boxcar deferred to ensure continuity
+					/* eslint-disable @typescript-eslint/unbound-method */
 					this.send(boxcar.messages, boxcar.tenantId, boxcar.documentId, boxcar.partitionId)
 						.then(boxcar.deferred.resolve)
 						.catch(boxcar.deferred.reject);
+					/* eslint-enable @typescript-eslint/unbound-method */
 				}
-
 			} catch (ex) {
 				// produce can throw if the outgoing message queue is full
 				boxcar.deferred.reject(ex);
